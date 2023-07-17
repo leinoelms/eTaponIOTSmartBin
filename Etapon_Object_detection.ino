@@ -58,22 +58,27 @@ int recentBottle;
 int currentBottle = 0;
 int level = 0;
 double points = 0.0;
+double bottlePrice = 0.0;
 
 bool started = false;
 bool startScan = false;
 bool isScanning = false;
 bool scanComplete = false;
 
-int scanningtime = 0;
+bool depositTimer = false;
+int depositSeconds = 10;
 
 const int MIN_DISTANCE = 10;   // Replace with your desired minimum distance in centimeters.
 const int MAX_DISTANCE = 103; 
 
+bool userValidated = false;
 int seconds = 10;           // Variable to store the elapsed seconds
+int scanningSeconds = 7;
+bool scanningTimer = false;
 bool timerRunning = false;  // Flag to indicate if the timer is running
 
 String userID = "";
-double pointsEarned;
+double pointsEarned = 0.0;
 
 const char* ntpServer = "asia.pool.ntp.org";
 
@@ -117,6 +122,39 @@ void noBuzzer() {
   noTone(BUZZER);
 }
 
+void getBottlePoints() {
+  FirebaseJson content;
+  FirebaseJson pointsContent;
+
+  String pointsPath = "bottleprice/botprice";
+
+  if (Firebase.Firestore.getDocument(&fbdo, FIREBASE_PROJECT_ID, "", pointsPath.c_str())) {
+    FirebaseJson documentData;
+    FirebaseJsonData result;
+
+    documentData.setJsonData(fbdo.payload());
+    Serial.printf("Received Firebase data:\n%s\n\n", fbdo.payload().c_str());
+
+    if (documentData.get(result, "fields/points")) {
+      if (documentData.get(result, "fields/points/doubleValue")) {
+        bottlePrice = result.to<double>();
+        Serial.print("bottlePrice Value Set (Double): ");
+        Serial.println(bottlePrice);
+      } else if (documentData.get(result, "fields/points/integerValue")) {
+        bottlePrice = result.to<double>();
+        Serial.print("bottlePrice Value Set (Integer): ");
+        Serial.println(bottlePrice);
+      } else {
+        Serial.println("Error: 'doubleValue' or 'integerValue' not found in Firebase data.");
+      }
+    } else {
+      Serial.println("Error: 'fields/points' not found in Firebase data.");
+    }
+  } else {
+    Serial.println("Firebase Error: " + fbdo.errorReason());
+  }
+}
+
 
 
 void setup() {
@@ -125,17 +163,17 @@ void setup() {
   mySerial.begin(115200);
   configTime(0, 0, ntpServer);
   Wire.begin();
-  lcd.clear();
-  lcd.init();  // Initialize the LCD
-  lcd.backlight();
-  lcd.setCursor(5,0);
-  lcd.print("eTapon");
+  
   turnServo(SERVO_PIN, 0, 0);
   
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.print("Connecting to Wi-Fi");
   unsigned long ms = millis();
+  lcd.init();  // Initialize the LCD
+  lcd.backlight();
+  lcd.setCursor(0,0);
+  lcd.print("Please Wait!");
   while (WiFi.status() != WL_CONNECTED)
   {
       Serial.print(".");
@@ -165,13 +203,14 @@ void setup() {
   Firebase.begin(&config, &auth);
 
   Firebase.reconnectWiFi(true);
-
-
-
+  while(bottlePrice <= 0){
+    getBottlePoints();
+  }
+ 
+  
 
   pinMode(DEPOSIT_SENSOR, INPUT_PULLUP);
   pinMode(BUZZER, OUTPUT);
-
   // Check Huskylens Connectioni
   while (!huskylens.begin(Wire)) {
     Serial.println(F("Begin failed!"));
@@ -181,8 +220,37 @@ void setup() {
   }
   updateBinLevel();
 
-
+  lcd.clear();
+  lcd.setCursor(5,0);
+  lcd.print("eTapon");
+  Serial.println(bottlePrice);
 }  // setup end
+
+
+
+void validateUser(String userid){
+  userid.trim();
+  String usersPath = "users/" + userid;
+
+  if (Firebase.Firestore.getDocument(&fbdo, FIREBASE_PROJECT_ID, "", usersPath.c_str())){
+    if (fbdo.payload().length() > 0) {
+      userValidated = true;
+      Serial.printf("ok\n%s\n\n", fbdo.payload().c_str());
+    } else {
+      userValidated = false;
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("User Not Found");
+      delay(1000);
+      showBrand();
+      Serial.println("Document doesn't exist.");
+      resetBin();
+    }
+  }    
+  else{
+      Serial.println(fbdo.errorReason());
+    }
+}
 
 
 
@@ -196,6 +264,34 @@ void loop() {
   if (!huskylens.request()) {
     Serial.println(F("Fail to request data from HUSKYLENS, recheck the connection!"));
   }
+  if(mySerial.available()){
+    Serial.print("Serial Available");
+    String c = mySerial.readString();
+    userID = c;
+    userID.trim();
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("ID :");
+    lcd.print(userID);
+    delay(500);
+    if(userID.length() >1){
+      validateUser(userID);
+      if(userValidated){
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Waiting");
+        lcd.setCursor(0, 1);
+        lcd.print("for Deposit");
+        depositTimer = true;
+      }
+      else{
+        lcd.clear();
+        lcd.print("User Not Found");
+        delay(2000);
+        showBrand();
+      }
+    }  
+  }//end if(mySerial.available)
   if (currentBinLevel <= 20 && started == false) {
     Serial.print(String(currentBinLevel));
     toneBinFull();
@@ -204,17 +300,20 @@ void loop() {
     showBrand();
   }
   // else if (getBinLevel() <= 10 && started == true && plasticDetected == false && isScanning == false) {
-  else if (currentBinLevel <= 20 && isScanning == false && started == true && timerRunning == true && plasticDetected == false) {
+  else if (timerRunning == true && currentBinLevel <= 20 && isScanning == false && started == true && plasticDetected == false) {
     Serial.print(String(currentBinLevel));
     timerRunning = false;
     toneBinFull();
     displayLCD("Bin Full");
     delay(1000);
-    displayLCD("Scan QR Code"); 
-    scanQRCode(); 
+    displayLCD("Points Sending"); 
+    epochTime = getTime();
+    sendPoints(userID);
+    resetBin(); 
   } 
-  else {
+  else if(userValidated){
     if (digitalRead(DEPOSIT_SENSOR) == LOW && getBinLevel() > 20 && isScanning == false && startScan == false) {
+      depositTimer = false;
       started = true;
       timerRunning = false;
       seconds = 10;
@@ -227,11 +326,8 @@ void loop() {
 
     // Object Detection Start
     if (startScan == true && plasticDetected == false) {
-      isScanning == true;
-      scanningtime++;
-      if(scanningtime == 120){
-        reset();
-      }
+      scanningTimer = true;
+      isScanning = true;
       Serial.println("Scanning Start");
       while (huskylens.available() && !plasticDetected) {
         Serial.println(".");
@@ -239,29 +335,34 @@ void loop() {
         HUSKYLENSResult result = huskylens.read(); 
         if(!plasticDetected) {
           if(result.ID == PLASTIC_BOTTLE_ID_1 ){
-            scanningtime = 0;
             plasticDetectedCheck++;
           }else if(result.ID != PLASTIC_BOTTLE_ID_1 ){
-            scanningtime = 0;
             notBottle++;
           }else{
             notBottle++;
           }
           
           if (plasticDetectedCheck == 5) {
-            isScanning == false;
+            scanningTimer = false;
             plasticDetected = true;
+            isScanning = false;
             turnServo(SERVO_PIN, 90, 500);
             lcd.clear();
             lcd.setCursor(0, 0);
             lcd.print("Bottle Accepted");
             okBuzzer();
           } else if (notBottle == 5) {
-            scanningtime = 0;
+            scanningTimer = false;
+            isScanning = false;
+            startScan = false;
             noBuzzer();
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Not Accepted");
             plasticDetected = false;
             plasticDetectedCheck = 0;
             notBottle = 0;
+            timerRunning = true;
             break;
           }
           delay(10);
@@ -289,10 +390,59 @@ void loop() {
     plasticDetectedCheck = 0;
     currentBottle = 0;
     notBottle = 0;
-    // updateBinLevel();
-    // showPoints();
 
   }  // if ir sensor end
+
+  if (depositTimer) {
+      lcd.setCursor(0, 0);  // Set the cursor to the first row
+      lcd.print("Scanning");
+    if (currentMillis - previousMillis >= interval) {
+      delay(200);
+      // Display the timer on the LCD
+      previousMillis = currentMillis;
+      // lcd.setCursor(0,1);
+      // lcd.print("Time Left: ");
+      // lcd.print(scanningSeconds);
+      // lcd.print(" ");
+      depositSeconds--;
+    }
+  }
+  if(depositSeconds == 0){
+    depositTimer = false;
+    lcd.clear();
+    displayLCD("No Deposit");
+    delay(1000);
+    displayLCD("Transaction End");
+    delay(500);
+    resetBin();
+
+  }
+  if (scanningTimer) {
+      lcd.setCursor(0, 0);  // Set the cursor to the first row
+      lcd.print("Scanning");
+    if (currentMillis - previousMillis >= interval) {
+      delay(200);
+      // Display the timer on the LCD
+      previousMillis = currentMillis;
+      // lcd.setCursor(0,1);
+      // lcd.print("Time Left: ");
+      // lcd.print(scanningSeconds);
+      // lcd.print(" ");
+      scanningSeconds--;
+    }
+  }
+
+  if(scanningSeconds == 0){
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("Cant Detect");
+    isScanning=false;
+    scanningTimer=false;
+    startScan = false;
+    timerRunning = true;
+    scanningSeconds=7;
+    delay(1000);
+  }
 
   if (timerRunning) {
       lcd.setCursor(0, 0);  // Set the cursor to the first row
@@ -309,59 +459,27 @@ void loop() {
     }
   }
 
-  if (seconds == 0) {
-        timerRunning = false;  // Stop the timer
-        delay(300);
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Scan QR Code");
-        delay(200);
-        while(!scanComplete){
-          scanQRCode();
-        }  // Start scanning the QR code
-  }
-
-  // Check if scanning is complete
-  if (scanComplete) {
-    lcd.setCursor(0, 1);  // Set the cursor to the second row
-    lcd.print("User ID: ");
-    lcd.print(userID);
-    
-    // Print the scanned data to the serial monitor
-    Serial.print("User ID: ");
-    Serial.println(userID);
-    epochTime = getTime();
+  if (seconds == 0 && plasticBottleCount >= 1) {
+    timerRunning = false;  // Stop the timer
+    delay(300);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Points sending...");
     delay(200);
-    sendPoints(userID);
-    
-    displayLCD("Points Sent");
-    delay(5000);
+    epochTime = getTime();
+    sendPoints(userID); // Start scanning the QR code
     resetBin();
-    Serial.println("Bin Reset");
-    // Reset the scanning flags and variables
-    userID = "";
-    scanComplete = false;
-    seconds = 10;
+  }else if(seconds == 0 && plasticBottleCount == 0){
+    timerRunning = false;  // Stop the timer
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Transaction End");
+    delay(2000);
+    resetBin();
   }
 
 }
 
-
-void scanQRCode() {
-  // Wait for input before starting scanning
-  while (!mySerial.available()) {
-    // Do nothing, wait for input
-  }
-  delay(200);  // Delay to ensure complete input is received
-  // Start scanning the QR code
-  while (mySerial.available() && userID.length() < 7) {
-    Serial.print("Serial Available");
-    String c = mySerial.readString();
-    userID += c;  
-  }
-  
-  scanComplete = true;  // Set the scanning complete flag
-}
 
 void displayLCD(String message){
   lcd.clear();
@@ -377,39 +495,16 @@ int getBinLevel() {
 
 void showBinFull() {
   lcd.clear();
-  lcd.setCursor(0, 0);
+  lcd.setCursor(4, 0);
   lcd.print("Bin Full");
   lcd.setCursor(0, 1);
-  lcd.print("Try Again Later");
   delay(1000);
 }
 
 double computePoints(){
-  return double(plasticBottleCount) * 0.20;
+  return double(plasticBottleCount) * bottlePrice;
 }
 
-
-// void updateTotalBottles(){
-//     FirebaseJson content;
-//     FirebaseJson pointsContent;
-  
-//     String path = "bin_log";
-//     Serial.print(path);
-//     pointsEarned = computePoints();
-//     content.clear();
-//     content.set("fields/points/doubleValue", pointsEarned);
-//     content.set("fields/totalBottle/integerValue", plasticBottleCount);
-//     content.set("fields/userID/stringValue", uid);
-
-//      Serial.print("Sending Points... ");
-
-//     if (Firebase.Firestore.createDocument(&fbdo, FIREBASE_PROJECT_ID, "" /* databaseId can be (default) or empty */, path.c_str(), content.raw()))
-//         Serial.printf("ok\n%s\n\n", fbdo.payload().c_str());
-//     else
-//         Serial.println(fbdo.errorReason());
-    
-
-// }
 
 void createLog(String uid){
     uid.trim();
@@ -445,9 +540,11 @@ void createTransaction(String uid){
     delay(100);
     Serial.print(path);
     pointsEarned = computePoints();
+    
     Serial.print(epochTime);
     content.clear();
-    content.set("fields/points/doubleValue", pointsEarned);
+    content.set("fields/points/doubleValue", double(pointsEarned));
+    content.set("fields/totalBottles/integerValue", plasticBottleCount);
     content.set("fields/type/stringValue", "Earned Points");
     content.set("fields/createdAt/timestampValue", getRfc3339Timestamp(epochTime));
     Serial.print("Creating Transaction... ");
@@ -570,6 +667,11 @@ void resetBin(){
     plasticDetectedCheck = 0;
     currentBottle = 0;
     notBottle = 0;
+    userID = "";
+    scanComplete = false;
+    seconds = 10;
+    userValidated = false;
+    depositSeconds=10;
 }
 
 void reset(){
@@ -583,6 +685,10 @@ void reset(){
     plasticDetectedCheck = 0;
     currentBottle = 0;
     notBottle = 0;
+    userID = "";
+    scanComplete = false;
+    seconds = 10;
+    userValidated = false;
 }
 
 void showBrand(){
